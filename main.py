@@ -4,6 +4,7 @@ import json
 import re
 from pathlib import Path
 from time import perf_counter
+from math import isfinite
 
 
 DATA_PATH = Path(__file__).resolve().parent / "data.json"
@@ -19,8 +20,8 @@ def check_matrix(matrix, size):
     for row_number, row in enumerate(matrix, start=1):
         if not isinstance(row, list) or len(row) != size:
             raise ValueError(f"{row_number}번째 행의 열 수가 {size}개가 아닙니다.")
-        if any(type(value) not in (int, float) for value in row):
-            raise ValueError(f"{row_number}번째 행에 숫자가 아닌 값이 있습니다.")
+        if any(type(value) not in (int, float) or not isfinite(value) for value in row):
+            raise ValueError(f"{row_number}번째 행에 유효하지 않은 숫자가 있습니다.")
 
 
 def mac(pattern, filter_matrix):
@@ -69,18 +70,21 @@ def create_pattern(size, kind):
 
 def average_mac_ms(pattern, filter_matrix, repeats=REPEATS):
     """파일 읽기와 출력 시간을 제외하고 MAC 호출만 측정한다."""
+    # 초기 실행의 영향은 줄이되 워밍업 시간은 측정에 포함하지 않는다.
+    for _ in range(3):
+        mac(pattern, filter_matrix)
     durations = []
     for _ in range(repeats):
         start = perf_counter()
         mac(pattern, filter_matrix)
         durations.append((perf_counter() - start) * 1000)
-    return sum(durations) / len(durations)
+    return sum(durations) / len(durations), min(durations), max(durations)
 
 
 def performance_report(filters=None):
     print("\n[성능 분석] (각 크기별 MAC 10회 평균)")
-    print(f"{'크기':<10} {'평균 시간(ms)':>15} {'연산 횟수(N²)':>16}")
-    print("-" * 45)
+    print(f"{'크기':<10} {'평균(ms)':>12} {'최소(ms)':>12} {'최대(ms)':>12} {'연산 횟수(N²)':>16}")
+    print("-" * 70)
     for size in SIZES:
         sample = create_pattern(size, "Cross")
         filter_matrix = sample
@@ -92,8 +96,8 @@ def performance_report(filters=None):
                     filter_matrix = group["cross"]
                 except ValueError:
                     pass
-        elapsed = average_mac_ms(sample, filter_matrix)
-        print(f"{size}×{size:<7} {elapsed:>15.6f} {size * size:>16}")
+        average, minimum, maximum = average_mac_ms(sample, filter_matrix)
+        print(f"{size}×{size:<7} {average:>12.6f} {minimum:>12.6f} {maximum:>12.6f} {size * size:>16}")
     print("※ 실행 환경에 따라 측정 시간은 달라질 수 있습니다.")
 
 
@@ -106,9 +110,12 @@ def read_matrix(title, size=3):
             if len(raw) != size:
                 raise ValueError(f"각 줄에 {size}개의 숫자가 필요합니다.")
             row = [float(value) for value in raw]
+            if not all(isfinite(value) for value in row):
+                raise ValueError("유한한 숫자만 입력할 수 있습니다.")
             matrix.append(row)
         except ValueError:
             print(f"입력 형식 오류: 각 줄에 {size}개의 숫자를 공백으로 구분해 입력하세요.")
+            print("올바른 예시: 0 1 0")
     return matrix
 
 
@@ -126,9 +133,10 @@ def manual_mode():
     print(f"A 점수: {score_a:.16g}")
     print(f"B 점수: {score_b:.16g}")
     print("판정: " + ("판정 불가 (UNDECIDED)" if result == "UNDECIDED" else result))
-    print(f"연산 시간(평균/10회): {average_mac_ms(pattern, a):.6f} ms (A 필터 기준)")
+    average, minimum, maximum = average_mac_ms(pattern, a)
+    print(f"연산 시간(평균/10회): {average:.6f} ms (A 필터 기준)")
     print("\n[성능 분석: 입력한 3×3 패턴 기준]")
-    print(f"3×3 | 평균 {average_mac_ms(pattern, a):.6f} ms | 연산 횟수 9")
+    print(f"3×3 | 평균 {average:.6f} ms | 최소 {minimum:.6f} ms | 최대 {maximum:.6f} ms | 연산 횟수 9")
 
 
 def get_filters(data):
@@ -210,13 +218,13 @@ def json_mode():
             status = "PASS" if not reason else "FAIL"
             print(f"판정: {prediction} | expected: {expected} | {status}" + (f" ({reason})" if reason else ""))
             if reason:
-                failures.append((case_id, reason))
+                failures.append((case_id, reason, cross, x_score, expected, prediction))
             else:
                 passed += 1
         except (ValueError, TypeError, KeyError, IndexError) as exc:
             reason = str(exc)
             print(f"FAIL ({reason})")
-            failures.append((case_id, reason))
+            failures.append((case_id, reason, None, None, None, None))
 
     performance_report(data["filters"] if isinstance(data.get("filters"), dict) else None)
     print("\n[4] 결과 요약")
@@ -225,8 +233,10 @@ def json_mode():
     print(f"실패: {len(failures)}개")
     if failures:
         print("실패 케이스:")
-        for name, reason in failures:
+        for name, reason, cross, x_score, expected, prediction in failures:
             print(f"- {name}: {reason}")
+            if cross is not None:
+                print(f"  Cross={cross:.16g}, X={x_score:.16g}, expected={expected}, 판정={prediction}")
     else:
         print("실패 케이스 없음")
 
